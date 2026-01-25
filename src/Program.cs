@@ -16,8 +16,6 @@ builder.Services.AddScoped<CopilotAgent>();
 builder.Services.Configure<McpOptions>(options =>
 {
     options.Url = builder.Configuration["VANTAGE_INSTANCES_MCP_URL"];
-    options.ApiKey = builder.Configuration["VANTAGE_INSTANCES_MCP_KEY"]
-        ?? builder.Configuration["VANTAGE_INSTANCES_MCP_API_KEY"];
 });
 
 builder.Services.AddHttpClient<McpClient>(client =>
