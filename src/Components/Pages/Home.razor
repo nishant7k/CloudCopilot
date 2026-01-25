@@ -1,0 +1,457 @@
+﻿@page "/"
+@rendermode InteractiveServer
+
+<PageTitle>Cloud Copilot</PageTitle>
+
+<div class="page">
+    <header class="page-header">
+        <div>
+            <h1 class="eyebrow">Cloud Copilot</h1>
+            <h2 class="hero-title">Cloud copilot powered by Vantage MCP data.</h2>
+        </div>
+        <div class="status-row">
+            <span class="status-pill @(Status.CopilotConnected ? "ok" : "warn")">
+                Copilot CLI: @(Status.CopilotConnected ? "Connected" : "Disconnected")
+            </span>
+            <span class="status-pill @(Status.McpConnected ? "ok" : "warn")">
+                MCP: @(Status.McpConnected ? "Connected" : "Disconnected")
+            </span>
+        </div>
+    </header>
+
+    <main class="content">
+        <section class="chat">
+            <div class="transcript">
+                @if (!ChatState.Messages.Any())
+                {
+                    <div class="empty-state">
+                        <p>Ask about instance pricing, compare families, or list providers.</p>
+                        <div class="prompt-guide">
+                            <p class="muted">Example prompts:</p>
+                            <ul>
+                                <li>Price for m5.large in us-east-1 on-demand linux</li>
+                                <li>Get EC2 instance families</li>
+                                <li>Get EC2 region pricing for c7g.large in us-west-2</li>
+                                <li>Get Azure region pricing for Standard_D4as_v5 in eastus</li>
+                                <li>Get GCP region pricing for n2-standard-2 in us-central1</li>
+                                <li>Compare m5.large (us-east-1) vs Standard_D2s_v5 (eastus) vs n2-standard-2 (us-central1) on-demand linux</li>
+                            </ul>
+                            <p class="muted">If region or purchase option is missing, I’ll ask one clarifying question.</p>
+                        </div>
+                    </div>
+                }
+                @foreach (var message in ChatState.Messages)
+                {
+                    <div class="message @message.Role">
+                        <div class="bubble">
+                            @if (message.Role == "assistant")
+                            {
+                                if (TryParseDirectAnswer(message.Content, out var directAnswer))
+                                {
+                                    <div class="answer-card">
+                                        @if (!string.IsNullOrWhiteSpace(directAnswer.Message))
+                                        {
+                                            <p class="answer-message">@directAnswer.Message</p>
+                                        }
+                                        @if (directAnswer.ComparableOptions.Count > 0)
+                                        {
+                                            <div class="answer-grid">
+                                                @foreach (var option in directAnswer.ComparableOptions)
+                                                {
+                                                    <div class="answer-item">
+                                                        <strong>@option.InstanceType</strong>
+                                                        <span>@option.MinPrice</span>
+                                                    </div>
+                                                }
+                                            </div>
+                                        }
+                                        @if (directAnswer.Table.Count > 0)
+                                        {
+                                            <div class="answer-table">
+                                                <table>
+                                                    <tbody>
+                                                        @foreach (var row in directAnswer.Table)
+                                                        {
+                                                            <tr>
+                                                                @foreach (var cell in row)
+                                                                {
+                                                                    <td>@cell</td>
+                                                                }
+                                                            </tr>
+                                                        }
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        }
+                                        @if (!string.IsNullOrWhiteSpace(directAnswer.Note))
+                                        {
+                                            <p class="answer-note">@directAnswer.Note</p>
+                                        }
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="markdown-body">@((MarkupString)RenderMarkdown(message.Content))</div>
+                                }
+                            }
+                            else
+                            {
+                                <p>@message.Content</p>
+                            }
+                            <span class="timestamp">@message.Timestamp.LocalDateTime.ToString("HH:mm")</span>
+                        </div>
+                    </div>
+                }
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(ChatState.LastError))
+            {
+                <div class="error-banner">@ChatState.LastError</div>
+            }
+
+            <form class="composer" @onsubmit="SendAsync" @onsubmit:preventDefault="true">
+                <textarea
+                    rows="2"
+                    placeholder="Ask for pricing, a comparison, or instance filters"
+                    @bind="_input"
+                    @bind:event="oninput"
+                    @onkeydown="HandleKeyDown"
+                    disabled="@ChatState.IsBusy"></textarea>
+                <div class="composer-actions">
+                    <button type="button" class="ghost" @onclick="Clear" disabled="@ChatState.IsBusy">Clear</button>
+                    <button type="submit" class="primary" disabled="@ChatState.IsBusy">@(ChatState.IsBusy ? "Working..." : "Send")</button>
+                </div>
+            </form>
+        </section>
+
+        <aside class="debug">
+            <div class="panel">
+                <h2>Tool Calls</h2>
+                <div class="panel-body">
+                    <details class="tools-available">
+                        <summary>Available MCP tools (@Status.McpTools.Count)</summary>
+                        @if (Status.McpTools.Count == 0)
+                        {
+                            <p class="muted">No tools loaded.</p>
+                        }
+                        else
+                        {
+                            <ul>
+                                @foreach (var tool in Status.McpTools.OrderBy(t => t.Name))
+                                {
+                                    <li>
+                                        <strong>@tool.Name</strong>
+                                        @if (!string.IsNullOrWhiteSpace(tool.Description))
+                                        {
+                                            <span class="muted"> — @tool.Description</span>
+                                        }
+                                    </li>
+                                }
+                            </ul>
+                        }
+                    </details>
+                    @if (!ToolCalls.Entries.Any())
+                    {
+                        <p class="muted">No tool calls yet.</p>
+                    }
+                    else
+                    {
+                        @foreach (var entry in ToolCalls.Entries.OrderByDescending(e => e.Timestamp))
+                        {
+                            <div class="tool-call">
+                                <div class="tool-header">
+                                    <span>
+                                        @entry.Name
+                                        @if (entry.Name.Equals("tools/list", StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            <span class="muted">(@Status.McpTools.Count tools)</span>
+                                        }
+                                    </span>
+                                    <span class="pill @(entry.Succeeded ? "ok" : "warn")">
+                                        @entry.Timestamp.LocalDateTime.ToString("HH:mm:ss") · @entry.Duration.TotalMilliseconds.ToString("0") ms
+                                    </span>
+                                </div>
+                                <p class="muted">@entry.ArgumentsJson</p>
+                                @if (!string.IsNullOrWhiteSpace(entry.Error))
+                                {
+                                    <p class="error">@entry.Error</p>
+                                }
+                            </div>
+                        }
+                    }
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>Raw MCP Results</h2>
+                <div class="panel-body">
+                    @if (!McpResults.Entries.Any())
+                    {
+                        <p class="muted">No MCP results yet.</p>
+                    }
+                    else
+                    {
+                        @foreach (var entry in McpResults.Entries.OrderByDescending(e => e.Timestamp))
+                        {
+                            <details class="raw-result">
+                                <summary>@entry.ToolName (@entry.Timestamp.LocalDateTime.ToString("HH:mm:ss"))</summary>
+                                <pre>@entry.RawJson</pre>
+                            </details>
+                        }
+                    }
+                </div>
+            </div>
+        </aside>
+    </main>
+</div>
+
+@code {
+    private string _input = string.Empty;
+
+    [Inject] private ChatState ChatState { get; set; } = null!;
+    [Inject] private CopilotAgent CopilotAgent { get; set; } = null!;
+    [Inject] private ToolCallStore ToolCalls { get; set; } = null!;
+    [Inject] private McpResultStore McpResults { get; set; } = null!;
+    [Inject] private ConnectionStatus Status { get; set; } = null!;
+
+    private static readonly MarkdownPipeline MarkdownPipeline = new MarkdownPipelineBuilder()
+        .UseAdvancedExtensions()
+        .Build();
+
+    private static string RenderMarkdown(string content)
+    {
+        return Markdig.Markdown.ToHtml(content ?? string.Empty, MarkdownPipeline);
+    }
+
+    private static bool TryParseDirectAnswer(string content, out DirectAnswer answer)
+    {
+        answer = new DirectAnswer();
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return false;
+        }
+
+        var json = ExtractJson(content);
+        if (json is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var root = ParseJsonRoot(json);
+            if (root.TryGetProperty("action", out var actionElement)
+                && actionElement.GetString()?.Equals("direct_answer", StringComparison.OrdinalIgnoreCase) == true
+                && root.TryGetProperty("answer", out var answerElement))
+            {
+                return PopulateDirectAnswer(answerElement, ref answer);
+            }
+
+            return PopulateDirectAnswer(root, ref answer);
+        }
+        catch
+        {
+            try
+            {
+                var unescaped = JsonSerializer.Deserialize<string>(json);
+                if (string.IsNullOrWhiteSpace(unescaped))
+                {
+                    return false;
+                }
+
+                var root = ParseJsonRoot(unescaped);
+                if (root.TryGetProperty("action", out var actionElement)
+                    && actionElement.GetString()?.Equals("direct_answer", StringComparison.OrdinalIgnoreCase) == true
+                    && root.TryGetProperty("answer", out var answerElement))
+                {
+                    return PopulateDirectAnswer(answerElement, ref answer);
+                }
+
+                return PopulateDirectAnswer(root, ref answer);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
+    private static string? ExtractJson(string content)
+    {
+        content = StripCodeFences(content);
+        var start = content.IndexOf('{');
+        var end = content.LastIndexOf('}');
+        if (start < 0 || end <= start)
+        {
+            return null;
+        }
+
+        return content[start..(end + 1)];
+    }
+
+    private static string StripCodeFences(string content)
+    {
+        var trimmed = content.Trim();
+        if (!trimmed.StartsWith("```", StringComparison.Ordinal))
+        {
+            return content;
+        }
+
+        var fenceEnd = trimmed.IndexOf('\n');
+        if (fenceEnd < 0)
+        {
+            return content;
+        }
+
+        var withoutStart = trimmed[(fenceEnd + 1)..];
+        var endIndex = withoutStart.LastIndexOf("```", StringComparison.Ordinal);
+        if (endIndex >= 0)
+        {
+            return withoutStart[..endIndex].Trim();
+        }
+
+        return withoutStart.Trim();
+    }
+
+    private static JsonElement ParseJsonRoot(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement.Clone();
+        if (root.ValueKind == JsonValueKind.String)
+        {
+            var inner = root.GetString();
+            if (!string.IsNullOrWhiteSpace(inner))
+            {
+                using var innerDoc = JsonDocument.Parse(inner);
+                return innerDoc.RootElement.Clone();
+            }
+        }
+
+        return root;
+    }
+
+    private static bool PopulateDirectAnswer(JsonElement element, ref DirectAnswer answer)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (element.TryGetProperty("message", out var messageElement))
+        {
+            answer.Message = messageElement.GetString();
+        }
+
+        if (element.TryGetProperty("note", out var noteElement))
+        {
+            answer.Note = noteElement.GetString();
+        }
+
+        if (element.TryGetProperty("comparable_options", out var optionsElement)
+            && optionsElement.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var option in optionsElement.EnumerateArray())
+            {
+                var comparable = new ComparableOption
+                {
+                    InstanceType = option.TryGetProperty("instanceType", out var instanceElement) ? instanceElement.GetString() : null,
+                    MinPrice = option.TryGetProperty("minPrice", out var minElement) ? minElement.GetString() : null
+                };
+                if (!string.IsNullOrWhiteSpace(comparable.InstanceType))
+                {
+                    answer.ComparableOptions.Add(comparable);
+                }
+            }
+        }
+
+        if (element.TryGetProperty("table", out var tableElement)
+            && tableElement.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var row in tableElement.EnumerateArray())
+            {
+                if (row.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                var cells = new List<string>();
+                foreach (var cell in row.EnumerateArray())
+                {
+                    var text = cell.ValueKind == JsonValueKind.String ? cell.GetString() : cell.ToString();
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        cells.Add(text);
+                    }
+                }
+
+                if (cells.Count > 0)
+                {
+                    answer.Table.Add(cells);
+                }
+            }
+        }
+
+        return !string.IsNullOrWhiteSpace(answer.Message)
+               || !string.IsNullOrWhiteSpace(answer.Note)
+               || answer.ComparableOptions.Count > 0
+               || answer.Table.Count > 0;
+    }
+
+    private sealed class DirectAnswer
+    {
+        public string? Message { get; set; }
+        public string? Note { get; set; }
+        public List<ComparableOption> ComparableOptions { get; } = new();
+        public List<List<string>> Table { get; } = new();
+    }
+
+    private sealed class ComparableOption
+    {
+        public string? InstanceType { get; set; }
+        public string? MinPrice { get; set; }
+    }
+
+    private async Task SendAsync()
+    {
+        if (ChatState.IsBusy || string.IsNullOrWhiteSpace(_input))
+        {
+            return;
+        }
+
+        var message = _input.Trim();
+        _input = string.Empty;
+        ChatState.AddMessage(new ChatMessage("user", message, DateTimeOffset.Now));
+        ChatState.IsBusy = true;
+        ChatState.LastError = null;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var response = await CopilotAgent.HandleAsync(message, CancellationToken.None);
+            ChatState.AddMessage(new ChatMessage("assistant", response, DateTimeOffset.Now));
+        }
+        catch (Exception ex)
+        {
+            ChatState.LastError = ex.Message;
+            ChatState.AddMessage(new ChatMessage("assistant", "I hit an error while answering. Check the debug panels for details.", DateTimeOffset.Now));
+        }
+        finally
+        {
+            ChatState.IsBusy = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void Clear()
+    {
+        ChatState.Clear();
+    }
+
+    private async Task HandleKeyDown(KeyboardEventArgs args)
+    {
+        if (args.Key == "Enter" && !args.ShiftKey)
+        {
+            await SendAsync();
+        }
+    }
+}

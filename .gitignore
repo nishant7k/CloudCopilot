@@ -1,0 +1,20 @@
+# Build outputs
+bin/
+obj/
+
+# User/IDE files
+.idea/
+.vs/
+.vscode/
+.DS_Store
+*.user
+*.suo
+*.DotSettings.user
+.DS_Store
+# Rider/Resharper
+*.sln.iml
+*.resharper
+*_ReSharper*
+
+# Logs
+*.log
