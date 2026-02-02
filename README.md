@@ -2,6 +2,8 @@
 
 Blazor Server chatbot that uses the GitHub Copilot SDK (CLI server mode) and the Vantage Instances MCP server to answer cloud instance pricing questions with tool-backed facts.
 
+<img width="1883" height="819" alt="image" src="https://github.com/user-attachments/assets/b711c133-f355-4888-8678-2f4767f52963" />
+
 ## Prerequisites
 
 - .NET SDK 10.0
